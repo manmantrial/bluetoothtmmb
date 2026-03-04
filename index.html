@@ -43,6 +43,13 @@
         <!-- 視訊與預測結果顯示區塊 -->
         <div id="ai-section" class="hidden flex-col items-center gap-4 mt-2 w-full">
             <div id="webcam-container" class="flex justify-center items-center w-full overflow-hidden rounded-xl bg-gray-100 min-h-[300px]"></div>
+            
+            <!-- 新增：切換鏡頭按鈕 -->
+            <button id="toggle-camera-btn" onclick="toggleCamera()" class="w-full max-w-[400px] bg-gray-100 hover:bg-gray-200 text-gray-700 font-semibold py-2 px-4 rounded-lg transition duration-200 border border-gray-300 shadow-sm flex items-center justify-center gap-2 text-sm">
+                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
+                切換為後置鏡頭
+            </button>
+
             <div id="label-container" class="w-full text-left bg-gray-50 p-4 rounded-lg border border-gray-200 text-sm text-gray-700"></div>
             <div id="ai-status" class="text-sm font-medium text-indigo-600">模型準備中...</div>
         </div>
@@ -74,6 +81,7 @@
         // --- 變數宣告 ---
         let model, webcam, labelContainer, maxPredictions;
         let bluetoothDevice, uartCharacteristic;
+        let isFrontFacing = true; // 追蹤目前使用的鏡頭方向
         
         // --- 防抖動 (降低敏感度) 的變數 ---
         let lastSentLabel = "";       
@@ -116,12 +124,15 @@
                     throw new Error("MODEL_ERROR|" + err.message);
                 }
 
-                // [第二步]：嘗試開啟相機 (Google Sites 通常會在這裡失敗)
+                // [第二步]：嘗試開啟相機
                 document.getElementById('ai-status').innerText = "📷 模型載入成功！正在請求相機權限...";
-                const flip = true; 
+                
+                // 設定預設為前置鏡頭，開啟鏡像翻轉
+                const flip = isFrontFacing; 
                 webcam = new tmImage.Webcam(400, 400, flip); 
                 try {
-                    await webcam.setup(); 
+                    // 加入 facingMode 參數來控制前後鏡頭
+                    await webcam.setup({ facingMode: isFrontFacing ? "user" : "environment" }); 
                 } catch (err) {
                     throw new Error("CAMERA_ERROR|" + err.message);
                 }
@@ -156,7 +167,6 @@
                 console.error("AI 載入錯誤:", error);
                 const statusEl = document.getElementById('ai-status');
                 
-                // 根據錯誤類型提供精準提示
                 let errorTitle = "❌ 發生未知的錯誤";
                 let errorList = "";
 
@@ -166,10 +176,8 @@
                                  2. <b>網址錯誤</b>：請確保貼上的網址結尾有一串英文代碼。<br>
                                  3. <b>網路阻擋</b>：學校網路可能阻擋了 Google 雲端儲存空間。`;
                 } else if (error.message.includes("CAMERA_ERROR")) {
-                    errorTitle = "❌ 相機權限被網站阻擋";
-                    errorList = `1. <b>Google Sites 限制</b>：Google Sites 的嵌入功能會強制關閉相機與藍牙。<b>請勿將此程式碼直接嵌入 Google Sites。</b><br>
-                                 2. <b>解決方案</b>：請改用 GitHub Pages 託管此網頁，或是讓學生直接將 HTML 檔案下載至電腦/iPad 開啟。<br>
-                                 3. <b>一般權限</b>：若非上述情況，請確認已允許瀏覽器存取相機。`;
+                    errorTitle = "❌ 相機權限被阻擋或設備不支援";
+                    errorList = `請確認已允許瀏覽器存取相機權限。`;
                 }
 
                 statusEl.innerHTML = `${errorTitle}<br><div class='text-xs font-bold text-red-600 mt-2 p-3 bg-red-50 rounded-lg text-left border border-red-200 leading-relaxed'>
@@ -182,6 +190,63 @@
                 document.getElementById('start-ai-btn').disabled = false;
                 document.getElementById('start-ai-btn').classList.remove('opacity-50', 'cursor-not-allowed');
             }
+        }
+
+        // ==========================================
+        // 鏡頭切換功能
+        // ==========================================
+        async function toggleCamera() {
+            if (!webcam) return;
+            
+            const toggleBtn = document.getElementById('toggle-camera-btn');
+            toggleBtn.disabled = true;
+            toggleBtn.innerHTML = "⏳ 切換中...";
+
+            // 1. 徹底停止目前的攝影機與硬體串流
+            webcam.stop();
+            if (webcam.webcam && webcam.webcam.srcObject) {
+                webcam.webcam.srcObject.getTracks().forEach(track => track.stop());
+            }
+            
+            // 2. 切換鏡頭方向狀態
+            isFrontFacing = !isFrontFacing;
+            
+            // 3. 重新初始化 (前置鏡頭需要鏡像翻轉，後置鏡頭不需要)
+            const flip = isFrontFacing; 
+            webcam = new tmImage.Webcam(400, 400, flip);
+            
+            try {
+                // 套用新的 facingMode
+                await webcam.setup({ facingMode: isFrontFacing ? "user" : "environment" });
+                
+                if (webcam.webcam) {
+                    webcam.webcam.setAttribute("playsinline", "true");
+                    webcam.webcam.setAttribute("webkit-playsinline", "true");
+                }
+                
+                await webcam.play();
+                
+                // 更新畫面綁定
+                const webcamContainer = document.getElementById("webcam-container");
+                webcamContainer.innerHTML = "";
+                const canvas = webcam.canvas;
+                canvas.classList.add("w-full", "max-w-[400px]", "h-auto", "mx-auto", "rounded-xl", "shadow-sm");
+                webcamContainer.appendChild(canvas);
+                
+                // 更新按鈕文字
+                toggleBtn.innerHTML = isFrontFacing 
+                    ? `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg> 切換為後置鏡頭` 
+                    : `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg> 切換為前置鏡頭`;
+            } catch (error) {
+                console.error("切換鏡頭失敗:", error);
+                alert("切換鏡頭失敗，可能是此設備不支援後置鏡頭。");
+                
+                // 發生錯誤時退回原來的狀態
+                isFrontFacing = !isFrontFacing;
+                toggleBtn.innerHTML = isFrontFacing ? "切換為後置鏡頭" : "切換為前置鏡頭";
+            }
+            
+            toggleBtn.disabled = false;
         }
 
         async function loop() {
@@ -243,12 +308,6 @@
             const statusEl = document.getElementById('bt-status');
             const idInput = document.getElementById('microbit-id').value.trim().toLowerCase();
             
-            if (window.top !== window.self) {
-                statusEl.innerHTML = "❌ 嵌入環境阻止了藍牙存取。<br><span class='text-xs font-bold text-red-600 mt-1 block'>⚠️ 因為目前的網頁是被嵌入在 Google Sites 等沙盒中執行，瀏覽器會強制阻擋藍牙。請將此網頁獨立開啟 (如 Github Pages) 或下載 HTML 執行。</span>";
-                statusEl.classList.add('text-red-500');
-                return;
-            }
-
             if (!navigator.bluetooth) {
                 statusEl.innerText = "❌ 您的瀏覽器不支援 Web Bluetooth (iPad 請使用 Bluefy 瀏覽器)";
                 statusEl.classList.add('text-red-500');
