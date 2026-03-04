@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI x micro:bit 視覺控制器 (iPad/Bluefy 相容版)</title>
+    <!-- 引入 Tailwind CSS 美化版面 -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- 引入 TensorFlow.js 與 Teachable Machine 函式庫 -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@teachablemachine/image@latest/dist/teachablemachine-image.min.js"></script>
+    <style>
+        body {
+            background-color: #f3f4f6;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+        canvas {
+            border-radius: 0.75rem;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+            margin: 0 auto;
+        }
+    </style>
+</head>
+<body class="min-h-screen flex flex-col items-center justify-center py-10 px-4">
+
+    <div class="bg-white p-8 rounded-2xl shadow-xl w-full max-w-lg flex flex-col gap-6 text-center">
+        
+        <h1 class="text-2xl font-bold text-gray-800 mb-1">🤖 AI 視覺控制器</h1>
+        <p class="text-xs text-blue-600 mb-2 font-medium">✨ 支援 iPad Bluefy 瀏覽器</p>
+
+        <!-- 頂部按鈕：載入模型與相機 -->
+        <button id="start-ai-btn" onclick="initAI()" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-3 px-4 rounded-lg transition duration-200 ease-in-out shadow-md">
+            1. 載入模型並開啟相機
+        </button>
+
+        <!-- 中間：網址輸入框 -->
+        <div class="flex flex-col text-left">
+            <label for="model-url" class="text-sm font-medium text-gray-600 mb-1">Teachable Machine 模型網址</label>
+            <input type="text" id="model-url" placeholder="例如: https://teachablemachine.withgoogle.com/models/abcde/" 
+                   class="w-full border border-gray-300 rounded-lg px-4 py-3 focus:outline-none focus:ring-2 focus:ring-indigo-500 transition">
+        </div>
+
+        <!-- 視訊與預測結果顯示區塊 -->
+        <div id="ai-section" class="hidden flex-col items-center gap-4 mt-2 w-full">
+            <div id="webcam-container" class="flex justify-center items-center w-full overflow-hidden rounded-xl bg-gray-100 min-h-[300px]"></div>
+            <div id="label-container" class="w-full text-left bg-gray-50 p-4 rounded-lg border border-gray-200 text-sm text-gray-700"></div>
+            <div id="ai-status" class="text-sm font-medium text-indigo-600">模型準備中...</div>
+        </div>
+
+        <!-- 分隔線 -->
+        <hr class="border-gray-200">
+
+        <!-- 下方按鈕：藍牙連接 micro:bit -->
+        <div class="flex flex-col gap-3">
+            
+            <!-- 5 字碼輸入框 -->
+            <div class="flex flex-col text-left bg-blue-50 p-3 rounded-lg border border-blue-100">
+                <label for="microbit-id" class="text-sm font-bold text-blue-800 mb-1">🔍 多人環境精準配對 (建議填寫)</label>
+                <input type="text" id="microbit-id" placeholder="輸入 5 字碼 (例如: zagvi)" maxlength="5"
+                       class="w-full border border-gray-300 rounded-lg px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 transition text-center tracking-widest uppercase font-mono font-bold text-gray-700">
+                <span class="text-xs text-blue-600 mt-1">留空則搜尋所有設備。輸入後將只顯示您的 micro:bit。</span>
+            </div>
+
+            <button id="connect-bt-btn" onclick="connectMicrobit()" class="w-full bg-blue-500 hover:bg-blue-600 text-white font-semibold py-3 px-4 rounded-lg transition duration-200 ease-in-out shadow-md flex items-center justify-center gap-2">
+                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m7 7 10 10-5 5V2l5 5L7 17"/></svg>
+                2. 藍牙連接 micro:bit
+            </button>
+            <div id="bt-status" class="text-sm font-medium text-gray-500">藍牙狀態：未連接</div>
+        </div>
+
+    </div>
+
+    <script>
+        // --- 變數宣告 ---
+        let model, webcam, labelContainer, maxPredictions;
+        let bluetoothDevice, uartCharacteristic;
+        
+        // --- 防抖動 (降低敏感度) 的變數 ---
+        let lastSentLabel = "";       
+        let currentCandidate = "";    
+        let consecutiveMatches = 0;   
+        
+        const PROBABILITY_THRESHOLD = 0.85; 
+        const REQUIRED_FRAMES = 10;         
+
+        // --- micro:bit UART 藍牙服務 UUID ---
+        const UART_SERVICE_UUID = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
+        const UART_TX_CHARACTERISTIC_UUID = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"; 
+
+        // ==========================================
+        // 1. Teachable Machine AI 處理區塊
+        // ==========================================
+        async function initAI() {
+            const urlInput = document.getElementById('model-url').value.trim();
+            if (!urlInput) {
+                alert("請先在中間輸入框貼上 Teachable Machine 模型網址！");
+                return;
+            }
+
+            const URL = urlInput.endsWith('/') ? urlInput : urlInput + '/';
+            const modelURL = URL + "model.json";
+            const metadataURL = URL + "metadata.json";
+
+            document.getElementById('ai-section').classList.remove('hidden');
+            document.getElementById('ai-section').classList.add('flex');
+            document.getElementById('start-ai-btn').disabled = true;
+            document.getElementById('start-ai-btn').classList.add('opacity-50', 'cursor-not-allowed');
+
+            try {
+                // [第一步]：嘗試載入模型
+                document.getElementById('ai-status').innerText = "⏳ 正在下載並載入模型...";
+                try {
+                    model = await tmImage.load(modelURL, metadataURL);
+                    maxPredictions = model.getTotalClasses();
+                } catch (err) {
+                    throw new Error("MODEL_ERROR|" + err.message);
+                }
+
+                // [第二步]：嘗試開啟相機 (Google Sites 通常會在這裡失敗)
+                document.getElementById('ai-status').innerText = "📷 模型載入成功！正在請求相機權限...";
+                const flip = true; 
+                webcam = new tmImage.Webcam(400, 400, flip); 
+                try {
+                    await webcam.setup(); 
+                } catch (err) {
+                    throw new Error("CAMERA_ERROR|" + err.message);
+                }
+
+                // 🌟 【iPad / iOS 專屬優化】 🌟
+                if (webcam.webcam) {
+                    webcam.webcam.setAttribute("playsinline", "true");
+                    webcam.webcam.setAttribute("webkit-playsinline", "true");
+                }
+
+                await webcam.play();
+                window.requestAnimationFrame(loop);
+
+                // 將畫面加入網頁並置中放大
+                const webcamContainer = document.getElementById("webcam-container");
+                webcamContainer.innerHTML = "";
+                const canvas = webcam.canvas;
+                canvas.classList.add("w-full", "max-w-[400px]", "h-auto", "mx-auto", "rounded-xl", "shadow-sm");
+                webcamContainer.appendChild(canvas);
+                
+                // 準備標籤顯示區
+                labelContainer = document.getElementById("label-container");
+                labelContainer.innerHTML = "";
+                for (let i = 0; i < maxPredictions; i++) {
+                    labelContainer.appendChild(document.createElement("div"));
+                }
+                
+                document.getElementById('ai-status').innerText = "✅ AI 辨識運行中";
+                document.getElementById('ai-status').classList.replace('text-indigo-600', 'text-green-600');
+
+            } catch (error) {
+                console.error("AI 載入錯誤:", error);
+                const statusEl = document.getElementById('ai-status');
+                
+                // 根據錯誤類型提供精準提示
+                let errorTitle = "❌ 發生未知的錯誤";
+                let errorList = "";
+
+                if (error.message.includes("MODEL_ERROR")) {
+                    errorTitle = "❌ 雲端模型下載失敗";
+                    errorList = `1. <b>未上傳模型</b>：在 TM 網站匯出時，是否忘了點擊「上傳模型 (Upload my model)」按鈕？<br>
+                                 2. <b>網址錯誤</b>：請確保貼上的網址結尾有一串英文代碼。<br>
+                                 3. <b>網路阻擋</b>：學校網路可能阻擋了 Google 雲端儲存空間。`;
+                } else if (error.message.includes("CAMERA_ERROR")) {
+                    errorTitle = "❌ 相機權限被網站阻擋";
+                    errorList = `1. <b>Google Sites 限制</b>：Google Sites 的嵌入功能會強制關閉相機與藍牙。<b>請勿將此程式碼直接嵌入 Google Sites。</b><br>
+                                 2. <b>解決方案</b>：請改用 GitHub Pages 託管此網頁，或是讓學生直接將 HTML 檔案下載至電腦/iPad 開啟。<br>
+                                 3. <b>一般權限</b>：若非上述情況，請確認已允許瀏覽器存取相機。`;
+                }
+
+                statusEl.innerHTML = `${errorTitle}<br><div class='text-xs font-bold text-red-600 mt-2 p-3 bg-red-50 rounded-lg text-left border border-red-200 leading-relaxed'>
+                    ⚠️ 檢查清單：<br>${errorList}<br>
+                    <span class='font-normal mt-2 block text-gray-500 text-[10px]'>系統訊息：${error.message.split('|')[1] || error.message}</span>
+                </div>`;
+                
+                statusEl.classList.remove('text-indigo-600', 'text-green-600');
+                statusEl.classList.add('text-red-600');
+                document.getElementById('start-ai-btn').disabled = false;
+                document.getElementById('start-ai-btn').classList.remove('opacity-50', 'cursor-not-allowed');
+            }
+        }
+
+        async function loop() {
+            webcam.update(); 
+            await predict(); 
+            window.requestAnimationFrame(loop);
+        }
+
+        async function predict() {
+            const prediction = await model.predict(webcam.canvas);
+            
+            let highestProb = 0;
+            let bestClass = "";
+
+            for (let i = 0; i < maxPredictions; i++) {
+                const prob = prediction[i].probability.toFixed(2);
+                const className = prediction[i].className;
+                
+                labelContainer.childNodes[i].innerHTML = `
+                    <div class="flex justify-between mb-1">
+                        <span class="font-bold">${className}</span>
+                        <span>${Math.round(prob * 100)}%</span>
+                    </div>
+                    <div class="w-full bg-gray-200 rounded-full h-2 mb-2">
+                        <div class="bg-indigo-600 h-2 rounded-full" style="width: ${prob * 100}%"></div>
+                    </div>
+                `;
+
+                if (prediction[i].probability > highestProb) {
+                    highestProb = prediction[i].probability;
+                    bestClass = className;
+                }
+            }
+
+            if (highestProb > PROBABILITY_THRESHOLD) {
+                if (bestClass === currentCandidate) {
+                    consecutiveMatches++;
+                } else {
+                    currentCandidate = bestClass;
+                    consecutiveMatches = 1;
+                }
+
+                if (consecutiveMatches >= REQUIRED_FRAMES) {
+                    if (bestClass !== lastSentLabel) {
+                        lastSentLabel = bestClass;
+                        sendToMicrobit(bestClass);
+                    }
+                }
+            } else {
+                consecutiveMatches = 0;
+                currentCandidate = "";
+            }
+        }
+
+        // ==========================================
+        // 2. Web Bluetooth 藍牙通訊區塊
+        // ==========================================
+        async function connectMicrobit() {
+            const statusEl = document.getElementById('bt-status');
+            const idInput = document.getElementById('microbit-id').value.trim().toLowerCase();
+            
+            if (window.top !== window.self) {
+                statusEl.innerHTML = "❌ 嵌入環境阻止了藍牙存取。<br><span class='text-xs font-bold text-red-600 mt-1 block'>⚠️ 因為目前的網頁是被嵌入在 Google Sites 等沙盒中執行，瀏覽器會強制阻擋藍牙。請將此網頁獨立開啟 (如 Github Pages) 或下載 HTML 執行。</span>";
+                statusEl.classList.add('text-red-500');
+                return;
+            }
+
+            if (!navigator.bluetooth) {
+                statusEl.innerText = "❌ 您的瀏覽器不支援 Web Bluetooth (iPad 請使用 Bluefy 瀏覽器)";
+                statusEl.classList.add('text-red-500');
+                return;
+            }
+
+            try {
+                let deviceFilters = [];
+                
+                if (idInput && idInput.length === 5) {
+                    statusEl.innerText = `🔍 正在精準搜尋 micro:bit [${idInput}]...`;
+                    deviceFilters = [
+                        { namePrefix: `BBC micro:bit [${idInput}]` },
+                        { namePrefix: `micro:bit [${idInput}]` }
+                    ];
+                } else {
+                    statusEl.innerText = "🔍 正在搜尋所有 micro:bit...";
+                    deviceFilters = [
+                        { namePrefix: 'BBC micro:bit' },
+                        { namePrefix: 'micro:bit' }
+                    ];
+                }
+
+                statusEl.classList.remove('text-gray-500', 'text-red-500');
+                statusEl.classList.add('text-blue-500');
+
+                bluetoothDevice = await navigator.bluetooth.requestDevice({
+                    filters: deviceFilters,
+                    optionalServices: [UART_SERVICE_UUID]
+                });
+
+                bluetoothDevice.addEventListener('gattserverdisconnected', onDisconnected);
+
+                const server = await bluetoothDevice.gatt.connect();
+                const service = await server.getPrimaryService(UART_SERVICE_UUID);
+                uartCharacteristic = await service.getCharacteristic(UART_TX_CHARACTERISTIC_UUID);
+                
+                statusEl.innerText = "✅ 藍牙已成功連線！";
+                statusEl.classList.replace('text-blue-500', 'text-green-600');
+                document.getElementById('connect-bt-btn').innerText = "藍牙已連線";
+                document.getElementById('connect-bt-btn').classList.replace('bg-blue-500', 'bg-green-500');
+
+            } catch (error) {
+                console.error(error);
+                
+                if (error.name === 'SecurityError') {
+                    statusEl.innerHTML = "❌ 瀏覽器安全設定阻止了藍牙存取。";
+                } else if (error.name === 'NotFoundError') {
+                    statusEl.innerHTML = "❌ 找不到裝置或取消了選擇。<br><span class='text-xs font-bold text-red-600 mt-1 block'>⚠️ 檢查清單：<br>1. micro:bit 是否已開機？<br>2. 程式中是否加入了「啟動藍牙 UART 服務」積木？</span>";
+                } else if (error.name === 'NetworkError') {
+                    statusEl.innerHTML = "❌ 藍牙連線被拒絕 (GATT 錯誤)。<br><span class='text-xs font-bold text-red-600 mt-1 block'>⚠️ 解決方法：到 MakeCode 專案設定將配對模式改為「No Pairing Required」。</span>";
+                } else {
+                    statusEl.innerText = "❌ 連線失敗: " + error.message;
+                }
+                
+                statusEl.classList.remove('text-blue-500');
+                statusEl.classList.add('text-red-500');
+            }
+        }
+
+        function onDisconnected() {
+            const statusEl = document.getElementById('bt-status');
+            statusEl.innerText = "⚠️ 藍牙已斷線";
+            statusEl.classList.replace('text-green-600', 'text-red-500');
+            uartCharacteristic = null;
+            document.getElementById('connect-bt-btn').innerText = "2. 重新連接 micro:bit";
+            document.getElementById('connect-bt-btn').classList.replace('bg-green-500', 'bg-blue-500');
+        }
+
+        async function sendToMicrobit(message) {
+            if (!uartCharacteristic) return; 
+            
+            try {
+                const encoder = new TextEncoder();
+                const data = encoder.encode(message + "\n");
+                
+                // 🌟 【iPad / iOS 專屬優化】 🌟
+                // 優先使用 writeValueWithoutResponse，這在 Bluefy 等 iOS 藍牙瀏覽器中相容性與傳輸速度更好
+                if (uartCharacteristic.writeValueWithoutResponse) {
+                    await uartCharacteristic.writeValueWithoutResponse(data);
+                } else {
+                    await uartCharacteristic.writeValue(data);
+                }
+                
+                console.log("已發送至 micro:bit:", message);
+            } catch (error) {
+                console.error("發送資料失敗:", error);
+            }
+        }
+    </script>
+</body>
+</html>
